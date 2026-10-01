@@ -24,12 +24,13 @@ On Windows the executable is `target\release\cookie-heap-lab.exe`. Linux support
 
 ## Play and inspect
 
-The main screen shows total cookies baked, cookies available to spend, click power, and passive production. Generator rows show production per unit and total production from your owned units. Upgrade purchases appear in the same right column as generator purchases.
+Cookies available to spend are the largest number on the main screen, with lifetime cookies underneath. Generator rows show ownership and production per unit; hover for total production. Purchase buttons share one right column.
 
-- **Orders:** three customers reward baking, clicking, and generator ownership. All three progress together. Collecting a reward supplies a new order scaled to your bakery; rewards do not consume cookies.
-- **Baking rush:** click 12–20 times within 20 simulated seconds. Collect a cookie bonus on success. Missing the deadline costs nothing, and you can retry. Successful rushes have a ten-second cooldown.
-- **Recipes:** unlock Chocolate chip for 40 cookies (3× clicking) or Vanilla crunch for 80 (3× generator production). Unlocks are permanent within the saved game; switching is free, with one recipe active at a time. Click the recipe name below the production figures to open the recipe tab.
-- **Golden batch:** choose a temporary 7× boost or an instant cookie shower. The shower reward scales with your production.
+- **Orders:** customers reward baking, clicking, and generator ownership. Generator orders require batches of 3–25 purchases at a tier suited to current production. Their reward covers half the estimated purchase cost. The first generator order requires five Cursors.
+- **Baking rush:** offers arrive randomly, first after 45–90 simulated seconds, then 90–180 seconds after each event. Accept within 30 seconds and make 12–20 clicks in 20 seconds for a bonus. Missing a rush costs nothing.
+- **Recipes:** unlock Chocolate chip for 40 cookies (3× clicking) or Vanilla crunch for 80 (3× generator production). Unlocks are permanent within the saved game; switching is free, with one recipe active at a time. Choose recipes from the Recipes tab.
+- **Golden batch:** choose a temporary 7× boost or an instant cookie shower. The first arrives after 3–5 simulated minutes; later rewards are 4–7 minutes apart.
+- **Cookie-eating visitors:** sugar ants, crumb mice, and cookie gobblers appear occasionally. Shoo them away in 3–5 hits to recover what they ate. They leave after 20 seconds if ignored. Theft reduces spendable cookies, never lifetime production.
 
 Goals, rewards, recipe multipliers, rush progress, and deadlines are ordinary guest bytes. The same scanner and hex editor can modify them. See the [activity layouts](docs/memory-layout.md#bakery-activities) for instructor reference.
 
@@ -43,7 +44,9 @@ The scanner accepts:
 
 Run a first scan, change the value in the game, then narrow results. Click **Inspect** beside a result to open its memory address. Scan options contain integer widths, alignment, unknown initial values, and comparison filters. String and byte filters retain the original pattern length.
 
-In Memory, **double-click a hex cell, type hex byte pairs, and press Enter**. A sequence such as `E8 03 00 00 00 00 00 00` writes the little-endian integer 1000 starting at that cell. Escape cancels. All edits pass through the VM's checked memory API. Additional tools provide typed inspection, pointer following, watches, write provenance, and snapshots/diffs. Allocation information is available in Inspector; there is no separate heap panel.
+Memory shows only the heap. **Double-click a hex cell and type two hex digits** to write a byte and advance automatically, including across rows. You can also paste multiple byte pairs; `E8 03 00 00 00 00 00 00` writes the little-endian integer 1000. Escape stops editing; completed bytes remain written. All edits pass through the checked VM API. Copy and bookmark actions are in the byte context menu.
+
+The **Inspector** button in Memory opens a separate read-only popout with aligned allocation details, typed interpretations, pointer following, and watches. **Show object names** optionally reveals simulator names such as PlayerState or Generator[]. Other tools provide write history and snapshots/diffs.
 
 ## Save and load
 
@@ -51,7 +54,7 @@ Use **File → Save Game As…** (`Ctrl/Cmd+Shift+S`) to select an explicit dest
 
 Every launch without `--load` starts fresh, even if save files exist. There is no autosave, save on exit, implicit restoration, or offline production. Saves include mapped memory, allocator metadata and free list, seed/RNG state, guest tick, pointers, fractional production, achievements, and effect deadlines. Debugger windows, watches, scans, and diffs are excluded. Corrupted guest state can be saved and loaded exactly, including pointers that subsequently fault.
 
-Order progress, recipe unlocks, and active rushes resume exactly. Older saves are supported: loading adds the new activity allocations while preserving existing game bytes, heap addresses, RNG, and simulated time.
+Current saves resume orders, recipes, rushes, visitors, and timers exactly. Older saves are upgraded explicitly on load: missing allocations are added, event schedules adopt the new intervals, and incomplete one-purchase generator orders become batch orders. Existing heap addresses, balances, RNG, simulated time, and active rushes are preserved.
 
 ## Architecture and checks
 

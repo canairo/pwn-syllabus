@@ -297,7 +297,6 @@ impl Machine {
         m.store_init(bonus, 1)?;
         m.store_init(stats + 32, charm)?;
         m.store_init(charm, 1)?;
-        m.store_init(effects + 16, 600)?;
         for (i, spec) in GENERATORS.iter().enumerate() {
             let a = generators + i as u64 * GENERATOR_SIZE;
             for (off, v) in [(8, spec.price), (16, spec.rate), (24, 1)] {
@@ -470,17 +469,7 @@ impl Machine {
         let count = self.memory.read_u64(a)?;
         self.spend(price)?;
         self.store(a, count.saturating_add(1), "buy_generator")?;
-        self.store(
-            a + 8,
-            price
-                .saturating_add(
-                    (price / 100)
-                        .saturating_mul(15)
-                        .saturating_add((price % 100) * 15 / 100),
-                )
-                .max(price.saturating_add(1)),
-            "scale_price",
-        )?;
+        self.store(a + 8, next_generator_price(price), "scale_price")?;
         self.recalculate_production()
     }
     fn recalculate_production(&mut self) -> Result<()> {
@@ -764,6 +753,15 @@ impl Machine {
         // Corrupted guest pointers remain valid snapshot data and fault only on access.
         Ok(())
     }
+}
+fn next_generator_price(price: u64) -> u64 {
+    price
+        .saturating_add(
+            (price / 100)
+                .saturating_mul(15)
+                .saturating_add((price % 100) * 15 / 100),
+        )
+        .max(price.saturating_add(1))
 }
 fn integer_sqrt(n: u64) -> u64 {
     let mut lo = 0u64;

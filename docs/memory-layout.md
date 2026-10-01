@@ -10,11 +10,11 @@ All addresses are 64-bit values; all multibyte fields use little-endian encoding
 | Heap | `0x0000555500000000` | 65536 | RW- |
 | Stack, reserved | `0x00007FFFFFFFE000` | 4096 | RW- |
 
-Globals +0 contains the eight-byte player root pointer. Globals +8 contains the bakery activities pointer. Null and the unmapped gaps fault.
+Globals +0 contains the eight-byte player root pointer. Globals +8 contains the bakery activities pointer; globals +16 contains the bakery visitors pointer. Null and the unmapped gaps fault.
 
 ## Fresh allocation order
 
-PlayerName occupies heap +0 through +31. PlayerState immediately follows at heap +32 and occupies 136 bytes. Generator[], Upgrade[], Achievement[], Statistics, TemporaryEffects, ShopState, PrestigeState, RecipeBonus, LuckyCharm, BakeryActivities, and BakeryOrder[] follow in deterministic order with eight-byte alignment. Existing object layouts and adjacency are unchanged.
+PlayerName occupies heap +0 through +31. PlayerState immediately follows at heap +32 and occupies 136 bytes. Generator[], Upgrade[], Achievement[], Statistics, TemporaryEffects, ShopState, PrestigeState, RecipeBonus, LuckyCharm, BakeryActivities, BakeryOrder[], and BakeryVisitors follow in deterministic order with eight-byte alignment. Existing object layouts and adjacency are unchanged.
 
 ## PlayerState
 
@@ -62,15 +62,34 @@ The pointer at globals +8 references a 128-byte allocation. All fields below are
 | `0x18`, `0x20`, `0x28` | Three recipe-unlocked flags |
 | `0x30` | Total orders completed |
 | `0x38` | Baking rushes won |
-| `0x40` | Rush state: idle 0, running 1, reward ready 2, missed 3 |
+| `0x40` | Rush state: idle 0, running 1, reward ready 2, missed 3, offer available 4 |
 | `0x48` | Rush target clicks |
 | `0x50` | Rush clicks so far |
 | `0x58` | Rush cookie reward |
 | `0x60` | Rush deadline (absolute guest tick) |
-| `0x68` | Next permitted rush start tick |
+| `0x68` | Next random rush offer tick |
 | `0x70` | Last cookie shower reward |
 | `0x78` | Pointer to BakeryOrder[] |
 
 The order array has three 64-byte entries. Each contains kind at +0 (bake 0, click 1, generator 2), target at +8, starting counter at +16, reward at +24, generator index at +32, customer index at +40, completed-order count at +48, and a reserved field at +56. Baking and clicking progress subtract the starting counter from lifetime cookies or manual clicks; generator orders read current ownership. Claiming replaces the goal, baseline, reward, and customer, using the saved deterministic RNG.
 
 The recipe multipliers affect real clicking and passive production without modifying the stored base click/CPS values. Active rush clicks update the guest progress field; deadline expiry is driven only by guest ticks. All writes appear in write history. Unknown enum values and invalid pointers fault safely.
+
+## Bakery visitors
+
+Globals +16 points to an 80-byte allocation. Each field is a little-endian u64.
+
+| Offset | Field |
+| --- | --- |
+| `0x00` | Visitor kind: absent 0, sugar ants 1, crumb mouse 2, cookie gobbler 3 |
+| `0x08` | Remaining hits |
+| `0x10` | Next random arrival tick |
+| `0x18` | Next bite tick |
+| `0x20` | Cookies eaten per bite |
+| `0x28` | Cookies held by the current visitor |
+| `0x30` | Total cookies stolen |
+| `0x38` | Visitors defeated |
+| `0x40` | Departure tick |
+| `0x48` | Total cookies recovered |
+
+Bites occur once per second and are capped at the available balance. Defeating a visitor returns its held cookies without increasing lifetime production. All scheduling uses saved guest ticks and seeded randomness, with no offline progression. The recipe-label and charm-trading routines remain in the headless model for compatibility and corruption tests; their controls are not shown in the game UI.

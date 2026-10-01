@@ -341,17 +341,15 @@ impl CookieApp {
                         self.report(r);
                     }
                 }
-                RushState::Ready => {
+                RushState::Ready
                     if ui
                         .button(format!("Collect · +{}", compact(a.rush_reward)))
-                        .clicked()
-                    {
-                        let r = self.machine.claim_rush();
-                        self.report(r);
-                        if !self.error {
-                            self.status =
-                                format!("Rush complete! +{} cookies", number(a.rush_reward));
-                        }
+                        .clicked() =>
+                {
+                    let r = self.machine.claim_rush();
+                    self.report(r);
+                    if !self.error {
+                        self.status = format!("Rush complete! +{} cookies", number(a.rush_reward));
                     }
                 }
                 _ => {}

@@ -47,20 +47,44 @@ mod tests {
             "the same reward cannot be collected twice"
         );
         m.claim_order(0).unwrap();
-        m.buy_generator(0).unwrap();
-        m.claim_order(2).unwrap();
-        let v = m.view().unwrap();
-        assert_eq!(v.cookies, 85);
-        assert_eq!(v.activities.orders_done, 3);
-        assert!(v.activities.orders[2].target > v.activities.orders[2].progress);
         assert_eq!(
-            v.activities.orders[1].progress, 0,
+            m.activities_view().unwrap().orders[1].progress,
+            0,
             "reward cookies are not manual clicks"
         );
+        for _ in 0..40 {
+            m.click().unwrap();
+        }
+        for _ in 0..5 {
+            m.buy_generator(0).unwrap();
+        }
+        m.claim_order(2).unwrap();
+        let v = m.view().unwrap();
+        assert_eq!(v.cookies, 57);
+        assert_eq!(v.activities.orders_done, 3);
+        assert!(v.activities.orders[2].target > v.activities.orders[2].progress);
+        assert!(v.activities.orders[2].target - v.activities.orders[2].progress >= 3);
         assert!(
             v.achievements[1],
             "order rewards contribute to lifetime cookies"
         );
+    }
+    #[test]
+    fn generator_orders_follow_production_and_require_a_batch() {
+        let mut m = Machine::new(1).unwrap();
+        m.set(field::COOKIES, 7391, "test").unwrap();
+        m.set(field::CPS, 216, "test").unwrap();
+        let base = m.object(field::GENERATORS).unwrap();
+        m.store(base, 12, "test").unwrap();
+        m.refresh_order(2).unwrap();
+        let order = m.order_view(2).unwrap();
+        assert_eq!(
+            order.generator, 3,
+            "a bakery producing 216/s should work toward factories"
+        );
+        assert_eq!(order.target, 3);
+        assert_eq!(order.reward, (12_000 + 13_800 + 15_870) / 2);
+        assert!(m.claim_order(2).is_err());
     }
     #[test]
     fn recipes_charge_once_and_change_real_clicks_and_passive_production() {
@@ -335,7 +359,7 @@ impl Machine {
         for (i, (target, baseline, reward)) in [
             (20, self.value(field::LIFETIME).unwrap_or(0), 30),
             (10, clicks, 25),
-            (1, 0, 35),
+            (5, 0, 48),
         ]
         .into_iter()
         .enumerate()
@@ -478,23 +502,7 @@ impl Machine {
                     0,
                 )
             }
-            2 => {
-                let budget = self
-                    .value(field::COOKIES)?
-                    .max(click.saturating_mul(40))
-                    .max(cps.saturating_mul(90));
-                let tiers = GENERATORS
-                    .iter()
-                    .take_while(|g| g.price <= budget)
-                    .count()
-                    .max(1);
-                let tier = random % tiers as u64;
-                let g = self.object(field::GENERATORS)? + tier * GENERATOR_SIZE;
-                let goal = self.memory.read_u64(g)?.saturating_add(1);
-                let price = self.memory.read_u64(g + 8)?;
-                let reward = price.saturating_add(price / 2);
-                (goal, 0, reward.max(35), tier)
-            }
+            2 => self.generator_order_goal()?,
             _ => return Err(GameError::Locked),
         };
         for (offset, value) in [
@@ -505,6 +513,54 @@ impl Machine {
             (order_field::CUSTOMER, random % CUSTOMERS.len() as u64),
         ] {
             self.store(o + offset, value, "new_order")?;
+        }
+        Ok(())
+    }
+    fn generator_order_goal(&self) -> Result<(u64, u64, u64, u64)> {
+        let budget = (self.value(field::COOKIES)? / 2)
+            .max(self.click_power()?.saturating_mul(40))
+            .max(
+                self.value(field::CPS)?
+                    .saturating_mul(self.recipe_production_multiplier()?)
+                    .saturating_mul(60),
+            );
+        let tier = GENERATORS
+            .iter()
+            .rposition(|g| g.price <= budget)
+            .unwrap_or(0) as u64;
+        let g = self.object(field::GENERATORS)? + tier * GENERATOR_SIZE;
+        let owned = self.memory.read_u64(g)?;
+        let quantity = if owned == 0 && tier > 0 {
+            3
+        } else {
+            owned.div_ceil(2).clamp(5, 25)
+        };
+        let mut price = self.memory.read_u64(g + 8)?;
+        let mut cost = 0u64;
+        for _ in 0..quantity {
+            cost = cost.saturating_add(price);
+            price = next_generator_price(price);
+        }
+        Ok((owned.saturating_add(quantity), 0, cost / 2, tier))
+    }
+    pub(crate) fn rebalance_short_generator_order(&mut self) -> Result<()> {
+        let Ok(order) = self.order_view(2) else {
+            return Ok(());
+        };
+        if order.kind != OrderKind::Generator
+            || order.progress >= order.target
+            || order.target - order.progress >= 3
+        {
+            return Ok(());
+        }
+        let (target, _, reward, generator) = self.generator_order_goal()?;
+        let a = self.orders_address()? + 2 * ORDER_SIZE;
+        for (offset, value) in [
+            (order_field::TARGET, target),
+            (order_field::REWARD, reward),
+            (order_field::GENERATOR, generator),
+        ] {
+            self.store_init(a + offset, value)?;
         }
         Ok(())
     }

@@ -742,6 +742,9 @@ impl DebugWorkspace {
             .num_columns(2)
             .striped(true)
             .show(ui, |ui| {
+                ui.label(RichText::new("Type").strong());
+                ui.label(RichText::new("Value").strong());
+                ui.end_row();
                 for kind in ValueType::ALL {
                     ui.label(kind.label());
                     match app.machine.read_memory(self.selected, kind.width() as u64) {
