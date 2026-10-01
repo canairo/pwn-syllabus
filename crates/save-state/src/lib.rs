@@ -13,7 +13,7 @@ use vm_core::ExecutionBackend;
 
 pub const MAGIC: [u8; 8] = *b"CHLS64\r\n";
 pub const FORMAT_VERSION: u32 = 1;
-pub const COMPATIBILITY_VERSION: u32 = 2;
+pub const COMPATIBILITY_VERSION: u32 = 3;
 pub const MAX_FILE_SIZE: u64 = 32 * 1024 * 1024;
 const HEADER_SIZE: usize = 36;
 #[derive(Debug, Error)]
@@ -74,7 +74,7 @@ pub fn decode(data: &[u8]) -> Result<Machine, SaveError> {
         return Err(SaveError::UnsupportedVersion(version));
     }
     let compatibility = u32at(12);
-    if compatibility != 1 && compatibility != COMPATIBILITY_VERSION {
+    if !(1..=COMPATIBILITY_VERSION).contains(&compatibility) {
         return Err(SaveError::Incompatible(compatibility));
     }
     if data[16..24] != *b"U64LE\0\0\0" {
@@ -97,6 +97,17 @@ pub fn decode(data: &[u8]) -> Result<Machine, SaveError> {
         snapshot
             .machine
             .initialize_activities()
+            .map_err(|e| SaveError::Invalid(e.to_string()))?;
+        snapshot.machine.memory.clear_events();
+        snapshot
+            .machine
+            .validate()
+            .map_err(|e| SaveError::Invalid(e.to_string()))?;
+    }
+    if compatibility < 3 {
+        snapshot
+            .machine
+            .initialize_encounters()
             .map_err(|e| SaveError::Invalid(e.to_string()))?;
         snapshot.machine.memory.clear_events();
         snapshot
@@ -133,6 +144,47 @@ pub fn load(path: &Path) -> Result<Machine, SaveError> {
 mod tests {
     use super::*;
     #[test]
+    fn visitors_resume_and_older_saves_gain_new_event_timing() {
+        let mut m = Machine::new(8).unwrap();
+        for _ in 0..100 {
+            m.click().unwrap();
+        }
+        let a = m.encounters_address().unwrap();
+        let next = m
+            .memory
+            .read_u64(a + cookie_game::encounter_field::NEXT_SPAWN)
+            .unwrap();
+        m.tick = next - 1;
+        for _ in 0..21 {
+            m.advance_tick().unwrap();
+        }
+        let mut restored = decode(&encode(&m).unwrap()).unwrap();
+        assert_eq!(m.snapshot(), restored.snapshot());
+        for machine in [&mut m, &mut restored] {
+            for _ in 0..machine.encounter_view().unwrap().health {
+                machine.shoo_enemy().unwrap();
+            }
+        }
+        assert_eq!(m.snapshot(), restored.snapshot());
+        assert_eq!(restored.view().unwrap().cookies, 100);
+        // Model a compatibility-2 save with its original activity layout and no visitors.
+        m.heap.free(a).unwrap();
+        m.write_memory(vm_core::Architecture::GLOBALS + 16, &0u64.to_le_bytes())
+            .unwrap();
+        let mut bytes = encode(&m).unwrap();
+        bytes[12..16].copy_from_slice(&2u32.to_le_bytes());
+        let upgraded = decode(&bytes).unwrap();
+        assert_eq!(upgraded.player().unwrap(), m.player().unwrap());
+        assert_eq!(upgraded.tick, m.tick);
+        assert_eq!(upgraded.rng_state, m.rng_state);
+        assert_eq!(upgraded.view().unwrap().cookies, 100);
+        let gift = upgraded
+            .memory
+            .read_u64(upgraded.object(cookie_game::field::EFFECTS).unwrap() + 16)
+            .unwrap();
+        assert!(gift >= upgraded.tick + 180 * cookie_game::TICKS_PER_SECOND);
+    }
+    #[test]
     fn round_trip_and_exact_continuation() {
         let mut original = Machine::new(1234).unwrap();
         for _ in 0..40 {
@@ -146,7 +198,11 @@ mod tests {
         let bytes = encode(&original).unwrap();
         let mut loaded = decode(&bytes).unwrap();
         assert_eq!(original.snapshot(), loaded.snapshot());
-        for _ in 0..611 {
+        let gift_tick = original
+            .memory
+            .read_u64(original.object(cookie_game::field::EFFECTS).unwrap() + 16)
+            .unwrap();
+        for _ in original.tick..gift_tick {
             original.advance_tick().unwrap();
             loaded.advance_tick().unwrap();
         }
@@ -201,6 +257,19 @@ mod tests {
             original.click().unwrap();
         }
         original.select_recipe(1).unwrap();
+        let a = original.activities_address().unwrap();
+        original
+            .write_memory(
+                a + cookie_game::activity_field::RUSH_STATE,
+                &4u64.to_le_bytes(),
+            )
+            .unwrap();
+        original
+            .write_memory(
+                a + cookie_game::activity_field::RUSH_DEADLINE,
+                &600u64.to_le_bytes(),
+            )
+            .unwrap();
         original.start_rush().unwrap();
         for _ in 0..8 {
             original.click().unwrap();

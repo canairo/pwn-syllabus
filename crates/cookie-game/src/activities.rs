@@ -25,6 +25,14 @@ pub mod activity_field {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn offer(m: &mut Machine) {
+        m.offer_rush().unwrap();
+        let a = m.activities_address().unwrap();
+        m.store(a + activity_field::RUSH_TARGET, 12, "test")
+            .unwrap();
+        m.store(a + activity_field::RUSH_REWARD, 50, "test")
+            .unwrap();
+    }
     #[test]
     fn orders_progress_together_and_claims_generate_new_goals() {
         let mut m = Machine::new(1234).unwrap();
@@ -81,6 +89,7 @@ mod tests {
     #[test]
     fn rush_rewards_survive_deadline_and_cannot_be_claimed_twice() {
         let mut m = Machine::new(1).unwrap();
+        offer(&mut m);
         m.start_rush().unwrap();
         assert!(m.start_rush().is_err());
         for _ in 0..12 {
@@ -95,15 +104,18 @@ mod tests {
         assert_eq!(m.activities_view().unwrap().rush_wins, 1);
         assert!(m.claim_rush().is_err());
         assert!(m.start_rush().is_err());
-        for _ in 0..200 {
-            m.advance_tick().unwrap();
-        }
+        let next = m.activity_value(activity_field::RUSH_NEXT).unwrap();
+        assert!((90 * TICKS_PER_SECOND..=180 * TICKS_PER_SECOND).contains(&(next - m.tick)));
+        m.tick = next - 1;
+        m.advance_tick().unwrap();
+        assert_eq!(m.activities_view().unwrap().rush_state, RushState::Offered);
         m.start_rush().unwrap();
-        assert_eq!(m.activities_view().unwrap().rush_target, 13);
+        assert!((12..=20).contains(&m.activities_view().unwrap().rush_target));
     }
     #[test]
     fn rush_timeout_is_exact_and_failure_has_no_penalty() {
         let mut m = Machine::new(1).unwrap();
+        offer(&mut m);
         m.start_rush().unwrap();
         for _ in 0..399 {
             m.advance_tick().unwrap();
@@ -116,6 +128,7 @@ mod tests {
         assert_eq!(m.activities_view().unwrap().rush_progress, 1);
         assert_eq!(m.view().unwrap().cookies, 2);
         assert!(m.claim_rush().is_err());
+        offer(&mut m);
         m.start_rush().unwrap();
         assert_eq!(m.activities_view().unwrap().rush_progress, 0);
     }
@@ -123,9 +136,12 @@ mod tests {
     fn golden_batch_offers_exclusive_instant_cookies_or_a_boost() {
         let mut m = Machine::new(1).unwrap();
         assert!(m.claim_cookie_shower().is_err());
-        for _ in 0..600 {
-            m.advance_tick().unwrap();
-        }
+        let next = m
+            .memory
+            .read_u64(m.object(field::EFFECTS).unwrap() + 16)
+            .unwrap();
+        assert!((180 * TICKS_PER_SECOND..=300 * TICKS_PER_SECOND).contains(&next));
+        m.tick = next;
         let mut boosted = m.clone();
         boosted.claim_gift().unwrap();
         boosted.click().unwrap();
@@ -138,6 +154,11 @@ mod tests {
         assert!(!m.view().unwrap().gift_available);
         assert!(m.claim_gift().is_err());
         assert!(m.claim_cookie_shower().is_err());
+        let next = m
+            .memory
+            .read_u64(m.object(field::EFFECTS).unwrap() + 16)
+            .unwrap();
+        assert!((240 * TICKS_PER_SECOND..=420 * TICKS_PER_SECOND).contains(&(next - m.tick)));
     }
     #[test]
     fn guest_edits_control_recipe_order_rewards_and_rush_deadlines() {
@@ -154,6 +175,7 @@ mod tests {
             .unwrap();
         m.claim_order(0).unwrap();
         assert_eq!(m.view().unwrap().cookies, 1244);
+        offer(&mut m);
         m.start_rush().unwrap();
         m.write_memory(a + activity_field::RUSH_DEADLINE, &1u64.to_le_bytes())
             .unwrap();
@@ -172,6 +194,7 @@ mod tests {
         m.set(field::LIFETIME, 1_000_000, "test").unwrap();
         m.select_recipe(1).unwrap();
         m.buy_generator(0).unwrap();
+        offer(&mut m);
         m.start_rush().unwrap();
         m.prestige().unwrap();
         let v = m.view().unwrap();
@@ -251,6 +274,7 @@ pub enum RushState {
     Running,
     Ready,
     Missed,
+    Offered,
 }
 #[derive(Debug, Clone)]
 pub struct ActivitiesView {
@@ -487,10 +511,20 @@ impl Machine {
     pub fn start_rush(&mut self) -> Result<()> {
         let a = self.activities_address()?;
         let state = self.activity_value(activity_field::RUSH_STATE)?;
-        if state == 1 || state == 2 || self.tick < self.activity_value(activity_field::RUSH_NEXT)? {
+        if state != 4 || self.tick >= self.activity_value(activity_field::RUSH_DEADLINE)? {
             return Err(GameError::Locked);
         }
-        let target = 12 + self.activity_value(activity_field::RUSH_WINS)?.min(8);
+        self.store(a + activity_field::RUSH_STATE, 1, "start_baking_rush")?;
+        self.store(a + activity_field::RUSH_PROGRESS, 0, "start_baking_rush")?;
+        self.store(
+            a + activity_field::RUSH_DEADLINE,
+            self.tick.saturating_add(20 * TICKS_PER_SECOND),
+            "start_baking_rush",
+        )
+    }
+    fn offer_rush(&mut self) -> Result<()> {
+        let a = self.activities_address()?;
+        let target = 12 + self.next_random() % 9;
         let reward = self
             .click_power()?
             .saturating_mul(target)
@@ -502,16 +536,16 @@ impl Machine {
             )
             .max(50);
         for (offset, value) in [
-            (activity_field::RUSH_STATE, 1),
+            (activity_field::RUSH_STATE, 4),
             (activity_field::RUSH_TARGET, target),
             (activity_field::RUSH_PROGRESS, 0),
             (activity_field::RUSH_REWARD, reward),
             (
                 activity_field::RUSH_DEADLINE,
-                self.tick.saturating_add(20 * TICKS_PER_SECOND),
+                self.tick.saturating_add(30 * TICKS_PER_SECOND),
             ),
         ] {
-            self.store(a + offset, value, "start_baking_rush")?;
+            self.store(a + offset, value, "offer_baking_rush")?;
         }
         Ok(())
     }
@@ -530,16 +564,30 @@ impl Machine {
         Ok(())
     }
     pub(crate) fn advance_activity_tick(&mut self) -> Result<()> {
-        if self.activity_value(activity_field::RUSH_STATE)? == 1
+        let state = self.activity_value(activity_field::RUSH_STATE)?;
+        if (state == 0 || state == 3)
+            && self.tick >= self.activity_value(activity_field::RUSH_NEXT)?
+        {
+            self.offer_rush()?;
+        } else if (state == 1 || state == 4)
             && self.tick >= self.activity_value(activity_field::RUSH_DEADLINE)?
         {
             self.store(
                 self.activities_address()? + activity_field::RUSH_STATE,
-                3,
+                if state == 1 { 3 } else { 0 },
                 "rush_time_up",
             )?;
+            self.schedule_rush()?;
         }
         Ok(())
+    }
+    fn schedule_rush(&mut self) -> Result<()> {
+        let next = self.next_event_tick(90, 180);
+        self.store(
+            self.activities_address()? + activity_field::RUSH_NEXT,
+            next,
+            "schedule_rush",
+        )
     }
     pub fn claim_rush(&mut self) -> Result<()> {
         let a = self.activities_address()?;
@@ -552,11 +600,7 @@ impl Machine {
         )?;
         self.add_at(a + activity_field::RUSH_WINS, 1, "rush_win")?;
         self.store(a + activity_field::RUSH_STATE, 0, "claim_baking_rush")?;
-        self.store(
-            a + activity_field::RUSH_NEXT,
-            self.tick.saturating_add(10 * TICKS_PER_SECOND),
-            "rush_cooldown",
-        )
+        self.schedule_rush()
     }
     pub fn shower_reward(&self) -> Result<u64> {
         Ok(self
@@ -578,7 +622,7 @@ impl Machine {
             reward,
             "cookie_shower_reward",
         )?;
-        self.store(e + 16, self.tick.saturating_add(1200), "schedule_gift")
+        self.schedule_gift()
     }
     pub(crate) fn reset_activities_after_prestige(&mut self) -> Result<()> {
         let a = self.activities_address()?;
@@ -593,7 +637,8 @@ impl Machine {
         for i in 0..ORDER_COUNT {
             self.refresh_order(i)?;
         }
-        Ok(())
+        self.schedule_rush()?;
+        self.dismiss_enemy()
     }
     pub fn activities_view(&self) -> Result<ActivitiesView> {
         let value = |offset| self.activity_value(offset);
@@ -606,6 +651,7 @@ impl Machine {
             1 => RushState::Running,
             2 => RushState::Ready,
             3 => RushState::Missed,
+            4 => RushState::Offered,
             _ => return Err(GameError::InvalidState("unknown baking rush state".into())),
         };
         let mut recipes_unlocked = [false; 3];

@@ -18,7 +18,6 @@ pub struct CookieApp {
     dark: bool,
     pub(crate) shop_tab: u8,
     pub(crate) name_draft: String,
-    pub(crate) recipe_draft: String,
     status: String,
     error: bool,
     last_frame: Instant,
@@ -41,7 +40,6 @@ impl CookieApp {
             dark: false,
             shop_tab: 0,
             name_draft,
-            recipe_draft: "House recipe".into(),
             status: "Fresh session · save explicitly to keep it".into(),
             error: false,
             last_frame: Instant::now(),
@@ -98,7 +96,6 @@ impl CookieApp {
     fn replace_machine(&mut self, machine: Machine) {
         self.machine = machine;
         self.name_draft = self.machine.view().map(|v| v.name).unwrap_or_default();
-        self.recipe_draft = "House recipe".into();
         if self.debugger.is_some() {
             self.debugger = Some(DebugWorkspace::new());
         }
@@ -300,7 +297,7 @@ impl eframe::App for CookieApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn render(
+    pub(crate) fn render(
         ctx: &egui::Context,
         app: &mut CookieApp,
         events: Vec<egui::Event>,
@@ -357,7 +354,10 @@ mod tests {
             );
         }
     }
-    fn texts(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Color32, f32, egui::Pos2)>) {
+    pub(crate) fn texts(
+        shape: &egui::epaint::Shape,
+        out: &mut Vec<(String, egui::Color32, f32, egui::Pos2)>,
+    ) {
         match shape {
             egui::epaint::Shape::Text(t) => {
                 let section = &t.galley.job.sections[0];
@@ -387,6 +387,10 @@ mod tests {
     fn strong_labels_and_shop_tabs_use_readable_theme_text() {
         let ctx = egui::Context::default();
         let mut app = CookieApp::headless(Machine::new(1).unwrap(), false);
+        for _ in 0..20 {
+            app.machine.click().unwrap();
+        }
+        app.machine.buy_generator(0).unwrap();
         for dark in [false, true, false] {
             app.dark = dark;
             let theme = app.theme();
@@ -406,13 +410,23 @@ mod tests {
                     "{name} must use readable text in dark={dark}"
                 );
             }
-            let (_, _, size, _) = painted.iter().find(|(t, _, _, _)| t == "0").unwrap();
-            assert!(*size >= 64.0, "total cookies should be prominent");
-            assert!(painted.iter().any(|(t, _, _, _)| t == "total cookies"));
+            let (_, balance_color, size, _) = painted.iter().find(|(t, _, _, _)| t == "5").unwrap();
+            let (_, lifetime_color, lifetime_size, _) = painted
+                .iter()
+                .find(|(t, _, _, _)| t == "20 total cookies baked")
+                .unwrap();
+            assert!(*size >= 64.0, "available cookies should be prominent");
+            assert!(
+                *size > *lifetime_size,
+                "available cookies must be bigger than lifetime cookies"
+            );
+            assert_eq!(*balance_color, theme.text);
+            assert_eq!(*lifetime_color, theme.muted);
+            assert!(painted.iter().any(|(t, _, _, _)| t == "cookies available"));
             output.drop_without_applying_deltas();
         }
     }
-    fn click_label(ctx: &egui::Context, app: &mut CookieApp, label: &str) {
+    pub(crate) fn click_label(ctx: &egui::Context, app: &mut CookieApp, label: &str) {
         render(ctx, app, vec![]).drop_without_applying_deltas();
         let output = render(ctx, app, vec![]);
         let mut painted = vec![];
@@ -450,6 +464,19 @@ mod tests {
                 let mut app = CookieApp::headless(Machine::new(1).unwrap(), debug);
                 app.dark = dark;
                 app.theme().apply(&ctx, dark);
+                let a = app.machine.activities_address().unwrap();
+                app.machine
+                    .write_memory(
+                        a + cookie_game::activity_field::RUSH_STATE,
+                        &4u64.to_le_bytes(),
+                    )
+                    .unwrap();
+                app.machine
+                    .write_memory(
+                        a + cookie_game::activity_field::RUSH_DEADLINE,
+                        &600u64.to_le_bytes(),
+                    )
+                    .unwrap();
                 click_label(&ctx, &mut app, "Start rush");
                 assert_eq!(
                     app.machine.activities_view().unwrap().rush_state,
@@ -460,11 +487,11 @@ mod tests {
                 }
                 click_label(&ctx, &mut app, "Collect · +50");
                 assert_eq!(app.machine.view().unwrap().cookies, 62);
-                click_label(&ctx, &mut app, "Recipe: Classic");
+                click_label(&ctx, &mut app, "Recipes");
                 click_label(&ctx, &mut app, "Unlock · 40");
                 assert_eq!(app.machine.view().unwrap().click_power, 3);
                 assert_eq!(app.machine.view().unwrap().cookies, 22);
-                click_label(&ctx, &mut app, "Orders · 2 ready");
+                click_label(&ctx, &mut app, "Orders (2)");
                 click_label(&ctx, &mut app, "Collect · +25");
                 assert_eq!(app.machine.view().unwrap().cookies, 47);
                 assert_eq!(app.machine.activities_view().unwrap().orders_done, 1);

@@ -7,9 +7,11 @@ use vm_core::{
 };
 use vm_heap::{Heap, HeapError};
 mod activities;
+mod encounters;
 pub use activities::{
     ActivitiesView, OrderKind, OrderView, RECIPES, RecipeSpec, RushState, activity_field,
 };
+pub use encounters::{EncounterView, encounter_field};
 
 pub const TICKS_PER_SECOND: u64 = 20;
 pub const PLAYER_SIZE: u64 = 136;
@@ -205,6 +207,7 @@ pub struct GameView {
     pub recipe_multiplier: u64,
     pub charm_traded: bool,
     pub activities: ActivitiesView,
+    pub encounter: EncounterView,
 }
 impl Machine {
     pub fn new(seed: u64) -> Result<Self> {
@@ -302,6 +305,7 @@ impl Machine {
             }
         }
         m.initialize_activities()?;
+        m.initialize_encounters()?;
         m.memory.clear_events();
         Ok(m)
     }
@@ -564,7 +568,8 @@ impl Machine {
         if award > 0 {
             self.award(award, "passive_production")?;
         }
-        self.advance_activity_tick()
+        self.advance_activity_tick()?;
+        self.advance_encounters()
     }
     pub fn next_random(&mut self) -> u64 {
         self.rng_state = self.rng_state.wrapping_add(0x9E3779B97F4A7C15);
@@ -581,8 +586,7 @@ impl Machine {
         let duration = 200 + self.next_random() % 101;
         self.store(e, self.tick.saturating_add(duration), "activate_boost")?;
         self.store(e + 8, 7, "boost_multiplier")?;
-        self.store(e + 16, self.tick.saturating_add(1200), "schedule_gift")?;
-        Ok(())
+        self.schedule_gift()
     }
     pub fn trade_charm(&mut self) -> Result<()> {
         let stats = self.object(field::STATS)?;
@@ -693,6 +697,7 @@ impl Machine {
             recipe_multiplier: self.memory.read_u64(self.object(field::SHOP)? + 24)?,
             charm_traded: self.memory.read_u64(stats + 40)? != 0,
             activities: self.activities_view()?,
+            encounter: self.encounter_view()?,
         })
     }
     pub fn validate(&self) -> Result<()> {

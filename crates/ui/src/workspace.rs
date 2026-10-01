@@ -4,7 +4,7 @@ use debugger::{
 };
 use eframe::egui::{self, Button, RichText, ScrollArea};
 use egui_dock::{DockArea, DockState, TabViewer};
-use vm_core::{Address, Architecture, ExecutionBackend, Memory};
+use vm_core::{Address, Architecture, ExecutionBackend, Memory, RegionKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
@@ -63,13 +63,9 @@ pub(crate) struct DebugWorkspace {
     anchor: Address,
     selection_end: Address,
     jump: String,
-    region: usize,
     scroll_to: Option<f32>,
     back: Vec<Address>,
     bookmarks: Vec<Address>,
-    edit_hex: String,
-    typed_edit: String,
-    kind: ValueType,
     symbols: bool,
     scanner: Scanner,
     scan_value: String,
@@ -100,13 +96,9 @@ impl DebugWorkspace {
             anchor: Architecture::HEAP,
             selection_end: Architecture::HEAP,
             jump: format!("0x{:016X}", Architecture::HEAP),
-            region: 3,
             scroll_to: None,
             back: vec![],
             bookmarks: vec![],
-            edit_hex: String::new(),
-            typed_edit: String::new(),
-            kind: ValueType::U64,
             symbols: false,
             scanner: Scanner::default(),
             scan_value: "0".into(),
@@ -136,7 +128,7 @@ impl DebugWorkspace {
                 ui.close();
             }
             ui.menu_button("More tools", |ui| {
-                for tab in [Tab::Inspector, Tab::Watch, Tab::History, Tab::Diff] {
+                for tab in [Tab::Watch, Tab::History, Tab::Diff] {
                     if ui.button(tab.title()).clicked() {
                         self.open_tool(tab, ui.ctx());
                         ui.close();
@@ -192,12 +184,11 @@ impl DebugWorkspace {
         }
     }
     fn navigate(&mut self, a: Address, app: &mut CookieApp) {
-        if let Some((i, r)) = app
+        if let Some(r) = app
             .machine
             .memory_regions()
             .iter()
-            .enumerate()
-            .find(|(_, r)| r.contains(a))
+            .find(|r| r.kind() == RegionKind::Heap && r.contains(a))
         {
             if a != self.selected {
                 self.back.push(self.selected);
@@ -210,10 +201,12 @@ impl DebugWorkspace {
             self.anchor = a;
             self.selection_end = a;
             self.jump = format!("0x{a:016X}");
-            self.region = i;
+            self.inline_edit = None;
             self.scroll_to = Some(((a - r.base()) / 16) as f32 * 32.0);
         } else {
-            app.report::<(), _>(Err(format!("Unmapped guest address 0x{a:016X}")));
+            app.report::<(), _>(Err(format!(
+                "Memory shows heap addresses only: 0x{a:016X} is outside the heap"
+            )));
         }
     }
     fn selection(&self) -> (Address, u64) {
@@ -227,17 +220,17 @@ impl DebugWorkspace {
             Err(e) => app.report::<(), _>(Err(e)),
         }
     }
-    fn add_watch(&mut self) {
+    fn add_watch(&mut self, kind: ValueType) {
         if !self
             .watches
             .iter()
-            .any(|w| w.address == self.selected && w.kind == self.kind)
+            .any(|w| w.address == self.selected && w.kind == kind)
         {
             self.watches.push(Watch {
                 address: self.selected,
-                kind: self.kind,
+                kind,
                 name: if self.watch_name.is_empty() {
-                    self.kind.label().into()
+                    kind.label().into()
                 } else {
                     self.watch_name.clone()
                 },
@@ -270,92 +263,20 @@ impl DebugWorkspace {
             if ui.button("Follow pointer").clicked() {
                 self.follow(app);
             }
-        });
-        ui.collapsing("More memory actions", |ui| {
-            ui.horizontal_wrapped(|ui| {
-                egui::ComboBox::from_id_salt("region")
-                    .selected_text(format!(
-                        "{:?}",
-                        app.machine.memory_regions()[self.region].kind()
-                    ))
-                    .show_ui(ui, |ui| {
-                        for (i, r) in app.machine.memory_regions().iter().enumerate() {
-                            if ui
-                                .selectable_value(
-                                    &mut self.region,
-                                    i,
-                                    format!("{:?} · {}", r.kind(), r.permissions().label()),
-                                )
-                                .changed()
-                            {
-                                self.scroll_to = Some(0.0);
-                            }
-                        }
-                    });
-                if ui.button("Copy address").clicked() {
-                    ui.ctx().copy_text(format!("0x{:016X}", self.selected));
-                }
-                if ui.button("Copy bytes").clicked() {
-                    let (a, n) = self.selection();
-                    match app.machine.read_memory(a, n) {
-                        Ok(b) => ui.ctx().copy_text(hex(&b)),
-                        Err(e) => app.report::<(), _>(Err(e)),
-                    }
-                }
-                if ui.button("Bookmark").clicked() && !self.bookmarks.contains(&self.selected) {
-                    self.bookmarks.push(self.selected);
-                }
-                if !self.bookmarks.is_empty() {
-                    egui::ComboBox::from_id_salt("bookmarks")
-                        .selected_text("Bookmarks")
-                        .show_ui(ui, |ui| {
-                            for a in self.bookmarks.clone() {
-                                if ui.button(format!("{a:016X}")).clicked() {
-                                    self.navigate(a, app);
-                                }
-                            }
-                        });
-                }
-            });
-            if ui.button("Copy pointer value").clicked() {
-                match app.machine.read_memory(self.selected, 8) {
-                    Ok(b) => ui.ctx().copy_text(format!("0x{:016X}", unsigned(&b))),
-                    Err(e) => app.report::<(), _>(Err(e)),
-                }
+            if ui.button("Inspector").clicked() {
+                self.pending_tools.push(Tab::Inspector);
             }
         });
         let (start, n) = self.selection();
-        ui.collapsing("Edit raw bytes", |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(format!(
-                    "{start:016X} · {n} selected byte{}",
-                    if n == 1 { "" } else { "s" }
-                ));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.edit_hex)
-                        .hint_text("Hex bytes: 01 00 00 00")
-                        .desired_width(210.0),
-                );
-                if ui.button("Write bytes").clicked() {
-                    let result = parse_hex(&self.edit_hex).and_then(|b| {
-                        if b.is_empty() {
-                            Err("enter at least one byte".into())
-                        } else {
-                            app.machine.write_memory(start, &b)
-                        }
-                    });
-                    app.report(result);
-                }
-            });
-        });
-        ui.label(
-            RichText::new(
-                "Double-click a byte to type hex · Enter writes · Escape cancels · Shift-click selects",
-            )
-            .small()
-            .color(app.theme().muted),
-        );
-        let r = &app.machine.memory_regions()[self.region];
+        let Some(r) = app
+            .machine
+            .memory_regions()
+            .iter()
+            .find(|r| r.kind() == RegionKind::Heap)
+        else {
+            ui.label("No heap memory mapped");
+            return;
+        };
         let base = r.base();
         let len = r.len();
         let rows = len.div_ceil(16) as usize;
@@ -420,11 +341,16 @@ impl DebugWorkspace {
                                 && ui.input(|i| i.key_pressed(egui::Key::Escape))
                             {
                                 cancel_edit = true;
+                            } else if response.changed()
+                                && response.has_focus()
+                                && parse_hex(text).is_ok_and(|b| !b.is_empty())
+                            {
+                                byte_commit = Some((addr, text.clone(), true));
                             } else if (response.has_focus()
                                 && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                                 || response.lost_focus()
                             {
-                                byte_commit = Some((addr, text.clone()));
+                                byte_commit = Some((addr, text.clone(), false));
                             }
                             continue;
                         }
@@ -449,10 +375,48 @@ impl DebugWorkspace {
                             ui.memory_mut(|m| m.request_focus(egui::Id::new(("byte_edit", addr))));
                         }
                         response.context_menu(|ui| {
+                            if ui.button("Copy address").clicked() {
+                                ui.ctx().copy_text(format!("0x{addr:016X}"));
+                                ui.close();
+                            }
+                            if ui.button("Copy selected bytes").clicked() {
+                                let (a, n) = self.selection();
+                                match app.machine.read_memory(a, n) {
+                                    Ok(bytes) => ui.ctx().copy_text(hex(&bytes)),
+                                    Err(e) => app.report::<(), _>(Err(e)),
+                                }
+                                ui.close();
+                            }
+                            if ui.button("Copy pointer value").clicked() {
+                                match app.machine.read_memory(addr, 8) {
+                                    Ok(bytes) => {
+                                        ui.ctx().copy_text(format!("0x{:016X}", unsigned(&bytes)))
+                                    }
+                                    Err(e) => app.report::<(), _>(Err(e)),
+                                }
+                                ui.close();
+                            }
+                            if ui.button("Bookmark address").clicked() {
+                                if !self.bookmarks.contains(&addr) {
+                                    self.bookmarks.push(addr);
+                                }
+                                ui.close();
+                            }
+                            if !self.bookmarks.is_empty() {
+                                ui.menu_button("Bookmarks", |ui| {
+                                    for a in self.bookmarks.clone() {
+                                        if ui.button(format!("{a:016X}")).clicked() {
+                                            self.navigate(a, app);
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            }
                             if ui.button("Inspect byte").clicked() {
                                 self.selected = addr;
                                 self.anchor = addr;
                                 self.selection_end = addr;
+                                self.pending_tools.push(Tab::Inspector);
                                 ui.close();
                             }
                             if ui.button("Follow as 8-byte pointer").clicked() {
@@ -462,8 +426,7 @@ impl DebugWorkspace {
                             }
                             if ui.button("Watch as u64").clicked() {
                                 self.selected = addr;
-                                self.kind = ValueType::U64;
-                                self.add_watch();
+                                self.add_watch(ValueType::U64);
                                 ui.close();
                             }
                         });
@@ -488,7 +451,7 @@ impl DebugWorkspace {
         });
         if cancel_edit {
             self.inline_edit = None;
-        } else if let Some((address, text)) = byte_commit {
+        } else if let Some((address, text, advance)) = byte_commit {
             if text.trim().is_empty() {
                 self.inline_edit = None;
                 return;
@@ -505,6 +468,19 @@ impl DebugWorkspace {
                 self.anchor = address;
                 self.selection_end = address + count - 1;
                 self.inline_edit = None;
+                if advance
+                    && let Some(next) = address.checked_add(count).filter(|next| *next < base + len)
+                {
+                    self.selected = next;
+                    self.anchor = next;
+                    self.selection_end = next;
+                    self.jump = format!("0x{next:016X}");
+                    self.inline_edit = Some((next, String::new()));
+                    if (next - base) / 16 != (address - base) / 16 {
+                        self.scroll_to = Some(((next - base) / 16) as f32 * 32.0);
+                    }
+                    ui.memory_mut(|m| m.request_focus(egui::Id::new(("byte_edit", next))));
+                }
             } else {
                 ui.memory_mut(|m| m.request_focus(egui::Id::new(("byte_edit", address))));
             }
@@ -710,87 +686,86 @@ impl DebugWorkspace {
         });
     }
     fn inspector_ui(&mut self, ui: &mut egui::Ui, app: &mut CookieApp) {
-        ui.checkbox(&mut self.symbols, "Show semantic symbols");
-        ui.label(RichText::new(format!("0x{:016X}", self.selected)).monospace());
-        if let Some(r) = app
-            .machine
-            .memory_regions()
-            .iter()
-            .find(|r| r.contains(self.selected))
-        {
-            ui.label(format!("{:?} · {}", r.kind(), r.permissions().label()));
-        }
-        ui.label(pointer_label(self.selected, app.machine.allocations()));
-        if let Some(a) = app
+        let allocation = app
             .machine
             .allocations()
             .iter()
             .rev()
-            .find(|a| a.live && a.contains(self.selected))
-        {
-            ui.small(format!("{} bytes · generation {}", a.size, a.generation));
-            ui.monospace(format!("{:016X} .. {:016X}", a.base, a.end()));
-        }
-
-        if self.symbols
-            && let Some(a) = app
-                .machine
-                .allocations()
-                .iter()
-                .rev()
-                .find(|a| a.live && a.contains(self.selected))
-        {
-            ui.label(&a.semantic_type);
-        }
-        ScrollArea::vertical().id_salt("inspector").show(ui, |ui| {
-            egui::Grid::new("typed_interpretations")
-                .num_columns(2)
-                .striped(true)
-                .show(ui, |ui| {
-                    for kind in ValueType::ALL {
-                        ui.label(kind.label());
-                        match app.machine.read_memory(self.selected, kind.width() as u64) {
-                            Ok(b) => {
-                                ui.label(kind.interpret(&b).unwrap_or_else(|e| e));
-                            }
-                            Err(_) => {
-                                ui.label("Unreadable");
-                            }
-                        }
+            .find(|a| a.live && a.contains(self.selected));
+        egui::Grid::new("inspector_location")
+            .num_columns(2)
+            .spacing(egui::vec2(16.0, 6.0))
+            .show(ui, |ui| {
+                ui.label("Address");
+                ui.monospace(format!("0x{:016X}", self.selected));
+                ui.end_row();
+                ui.label("Allocation");
+                if let Some(a) = allocation {
+                    ui.label(format!(
+                        "#{} · offset +0x{:X}",
+                        a.id,
+                        self.selected - a.base
+                    ));
+                } else {
+                    ui.label(pointer_label(self.selected, app.machine.allocations()));
+                }
+                ui.end_row();
+                if let Some(a) = allocation {
+                    ui.label("Size");
+                    ui.label(format!(
+                        "{} bytes · generation {}",
+                        number(a.size),
+                        a.generation
+                    ));
+                    ui.end_row();
+                    ui.label("Range")
+                        .on_hover_text("The ending address is exclusive");
+                    ui.vertical(|ui| {
+                        ui.monospace(format!("0x{:016X}", a.base));
+                        ui.monospace(format!("to 0x{:016X}", a.end()));
+                    });
+                    ui.end_row();
+                    if self.symbols {
+                        ui.label("Object");
+                        ui.label(&a.semantic_type);
                         ui.end_row();
                     }
-                });
-            ui.add_space(16.0);
-            egui::ComboBox::from_id_salt("typed_edit_kind")
-                .selected_text(self.kind.label())
-                .show_ui(ui, |ui| {
-                    for k in ValueType::ALL {
-                        ui.selectable_value(&mut self.kind, k, k.label());
+                }
+            });
+        ui.checkbox(&mut self.symbols, "Show object names").on_hover_text("Reveal simulator object names such as PlayerState or Generator[] for the selected allocation.");
+        if ui.button("Follow 8-byte pointer").clicked() {
+            self.follow(app);
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        egui::Grid::new("typed_interpretations")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
+                for kind in ValueType::ALL {
+                    ui.label(kind.label());
+                    match app.machine.read_memory(self.selected, kind.width() as u64) {
+                        Ok(b) => {
+                            ui.label(kind.interpret(&b).unwrap_or_else(|e| e));
+                        }
+                        Err(_) => {
+                            ui.label("Unreadable");
+                        }
                     }
-                });
-            ui.add(egui::TextEdit::singleline(&mut self.typed_edit).hint_text("New value"));
-            if ui.button("Write typed value").clicked() {
-                let r = self
-                    .kind
-                    .encode(&self.typed_edit)
-                    .and_then(|b| app.machine.write_memory(self.selected, &b));
-                app.report(r);
-            }
-            if ui.button("Follow 8-byte pointer").clicked() {
-                self.follow(app);
-            }
-            ui.add(
-                egui::TextEdit::singleline(&mut self.watch_name)
-                    .hint_text("Watch label (optional)"),
-            );
-            if ui.button("Add watch").clicked() {
-                self.add_watch();
-            }
-        });
+                    ui.end_row();
+                }
+            });
+        ui.add_space(16.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut self.watch_name).hint_text("Watch label (optional)"),
+        );
+        if ui.button("Add u64 watch").clicked() {
+            self.add_watch(ValueType::U64);
+        }
     }
     fn watch_ui(&mut self, ui: &mut egui::Ui, app: &mut CookieApp) {
         if self.watches.is_empty() {
-            ui.label("No watches. Select a byte in Memory, then add a watch in Inspector.");
+            ui.label("No watches. Select a byte in Memory, open Inspector, then add a watch.");
         }
         let mut remove = None;
         ScrollArea::both().id_salt("watches").show(ui, |ui| {
@@ -914,7 +889,11 @@ impl TabViewer for Viewer<'_> {
             .show(ui, |ui| match tab {
                 Tab::Memory => self.workspace.memory_ui(ui, self.app),
                 Tab::Scanner => self.workspace.scanner_ui(ui, self.app),
-                Tab::Inspector => self.workspace.inspector_ui(ui, self.app),
+                Tab::Inspector => {
+                    ScrollArea::vertical().id_salt("inspector").show(ui, |ui| {
+                        self.workspace.inspector_ui(ui, self.app);
+                    });
+                }
                 Tab::Watch => self.workspace.watch_ui(ui, self.app),
                 Tab::History => self.workspace.history_ui(ui, self.app),
                 Tab::Diff => self.workspace.diff_ui(ui, self.app),
@@ -1002,6 +981,78 @@ mod tests {
             app.machine.memory.events().back().unwrap().source,
             vm_core::WriteSource::Debugger
         );
+    }
+    fn begin_edit(ctx: &egui::Context, app: &mut CookieApp, address: Address) {
+        let mut workspace = app.debugger.take().unwrap();
+        workspace.navigate(address, app);
+        workspace.open_tool(Tab::Memory, ctx);
+        workspace.inline_edit = Some((address, String::new()));
+        app.debugger = Some(workspace);
+        frame(ctx, app, vec![]);
+        frame(ctx, app, vec![]);
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new(("byte_edit", address))));
+    }
+    #[test]
+    fn hex_pairs_advance_across_rows_and_stop_at_heap_end() {
+        let ctx = egui::Context::default();
+        let mut app = CookieApp::headless(cookie_game::Machine::new(1).unwrap(), true);
+        app.theme().apply(&ctx, false);
+        frame(&ctx, &mut app, vec![]);
+        let address = Architecture::HEAP + 0x100F;
+        begin_edit(&ctx, &mut app, address);
+        frame(&ctx, &mut app, vec![egui::Event::Text("E".into())]);
+        assert_eq!(app.machine.read_memory(address, 1).unwrap(), vec![0]);
+        frame(&ctx, &mut app, vec![egui::Event::Text("8".into())]);
+        assert_eq!(app.debugger.as_ref().unwrap().selected, address + 1);
+        frame(&ctx, &mut app, vec![egui::Event::Text("0".into())]);
+        frame(&ctx, &mut app, vec![egui::Event::Text("3".into())]);
+        assert_eq!(app.machine.read_memory(address, 2).unwrap(), vec![0xE8, 3]);
+        assert_eq!(app.debugger.as_ref().unwrap().selected, address + 2);
+        let end = Architecture::HEAP + Architecture::HEAP_SIZE - 1;
+        begin_edit(&ctx, &mut app, end);
+        frame(&ctx, &mut app, vec![egui::Event::Text("AA BB".into())]);
+        assert!(app.error);
+        assert_eq!(app.machine.read_memory(end, 1).unwrap(), vec![0]);
+        begin_edit(&ctx, &mut app, end);
+        frame(&ctx, &mut app, vec![egui::Event::Text("FF".into())]);
+        assert_eq!(app.machine.read_memory(end, 1).unwrap(), vec![255]);
+        assert!(app.debugger.as_ref().unwrap().inline_edit.is_none());
+        assert!(!app.error);
+    }
+    #[test]
+    fn memory_stays_in_heap_and_opens_a_read_only_inspector() {
+        let ctx = egui::Context::default();
+        let mut app = CookieApp::headless(cookie_game::Machine::new(1).unwrap(), true);
+        app.theme().apply(&ctx, false);
+        frame(&ctx, &mut app, vec![]);
+        let mut workspace = app.debugger.take().unwrap();
+        workspace.open_tool(Tab::Memory, &ctx);
+        workspace.navigate(Architecture::GLOBALS, &mut app);
+        assert_eq!(workspace.selected, Architecture::HEAP);
+        assert!(app.error);
+        app.debugger = Some(workspace);
+        crate::tests::click_label(&ctx, &mut app, "Inspector");
+        assert!(
+            app.debugger
+                .as_ref()
+                .unwrap()
+                .dock
+                .find_tab(&Tab::Inspector)
+                .is_some()
+        );
+        assert_eq!(
+            app.debugger.as_ref().unwrap().dock.iter_all_tabs().count(),
+            2
+        );
+        let output = crate::tests::render(&ctx, &mut app, vec![]);
+        let mut painted = vec![];
+        for s in &output.shapes {
+            crate::tests::texts(&s.shape, &mut painted);
+        }
+        for removed in ["Write typed value", "More memory actions", "Edit raw bytes"] {
+            assert!(!painted.iter().any(|(text, _, _, _)| text == removed));
+        }
+        output.drop_without_applying_deltas();
     }
     #[test]
     fn scanner_ui_accepts_numbers_text_and_bytes() {
