@@ -88,7 +88,7 @@ Second goal: **calling the win function** by corrupting the Cursor object.
 **Auxiliary specifications**  
 A few important details
 
-* Cross-platform capabilities.  
+* Cross-platform capabilities, written in Python
 * In terms of aesthetics, **no aesthetic decisions** aside from the ones set out in the spec are to be made by an AI, this includes color scheme, font choice, images. Use placeholder images if needed, and place all game strings in a separate file which a human can rewrite. Layout decisions are fine. The generated output should be as **aesthetically simple** and importantly as **customizable** as possible, humans will be making all aesthetic choices re: the game.  
 * 
 
